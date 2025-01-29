@@ -322,10 +322,6 @@ class TextSplitCounterNode:
             logger.error(f"Error in count_splits: {str(e)}")
             return (0, f"Error: {str(e)}")
 
- 
-
- 
-
 class TextQueueProcessor:
     """處理文字佇列的節點"""
     def __init__(self):
@@ -371,8 +367,10 @@ class TextQueueProcessor:
                 "text": ("STRING", {
                     "multiline": True,
                     "default": "1girl\n1cat\n1dog",
-                    "placeholder": "每行輸入一個提示詞"
+                    "placeholder": "輸入提示詞，可用分隔符或換行分割"
                 }),
+                "separator_type": (["newline", "custom"], {"default": "newline"}),
+                "separator": ("STRING", {"default": ","}),
                 "start_index": ("INT", {"default": 0, "min": 0, "max": 10000}),
                 "trigger_next": ("BOOLEAN", {"default": True, "label_on": "Trigger", "label_off": "Don't trigger"}),
             },
@@ -385,7 +383,7 @@ class TextQueueProcessor:
     CATEGORY = "TextBatch"
     OUTPUT_NODE = True
 
-    def process(self, text, start_index, trigger_next, unique_id):
+    def process(self, text, separator_type, separator, start_index, trigger_next, unique_id):
         try:
             # 檢查是否需要重置
             need_reset = (
@@ -397,8 +395,12 @@ class TextQueueProcessor:
                 self.reset_state()
                 self.state["last_input"] = text
 
-            # 分割文本為行
-            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            # 根據分隔符類型分割文本
+            if separator_type == "newline":
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+            else:
+                lines = [line.strip() for line in text.split(separator) if line.strip()]
+            
             total = len(lines)
 
             if total == 0:
