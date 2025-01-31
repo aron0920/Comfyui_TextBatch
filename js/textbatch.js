@@ -156,3 +156,102 @@ app.registerExtension({
 //     console.log('#executed', detail) 
 //     console.log(output)
 // })
+
+// TextQueueProcessor 節點擴展
+class TextQueueProcessorNode {
+    constructor() {
+        if (!this.properties) {
+            this.properties = {};
+        }
+        this.addCustomWidgets();
+    }
+
+    addCustomWidgets() {
+        // 添加重置按鈕
+        this.addWidget("button", "🔄 Reset", null, () => {
+            // 觸發重置
+            this.triggerReset();
+        });
+
+        // 添加跳到開頭按鈕
+        this.addWidget("button", "⏮️ To Start", null, () => {
+            // 將 start_index 設為 0
+            this.widgets.find(w => w.name === "start_index").value = 0;
+        });
+
+        // 添加跳到結尾按鈕
+        this.addWidget("button", "⏭️ To End", null, () => {
+            // 獲取 total 值（如果有的話）
+            const total = this.outputs?.[2]?.value ?? 0;
+            if (total > 0) {
+                this.widgets.find(w => w.name === "start_index").value = total - 1;
+            }
+        });
+    }
+
+    triggerReset() {
+        // 發送重置事件到後端
+        const nodeId = this.id;
+        app.graphToPrompt().then(workflow => {
+            if (workflow.output) {
+                app.queuePrompt(workflow.output, workflow.workflow);
+            }
+        });
+    }
+}
+
+// ImageQueueProcessor 節點擴展
+class ImageQueueProcessorNode {
+    constructor() {
+        if (!this.properties) {
+            this.properties = {};
+        }
+        this.addCustomWidgets();
+    }
+
+    addCustomWidgets() {
+        // 添加重置按鈕
+        this.addWidget("button", "🔄 Reset", null, () => {
+            // 觸發重置
+            this.triggerReset();
+        });
+
+        // 添加跳到開頭按鈕
+        this.addWidget("button", "⏮️ To Start", null, () => {
+            // 將 start_index 設為 0
+            this.widgets.find(w => w.name === "start_index").value = 0;
+        });
+
+        // 添加跳到結尾按鈕
+        this.addWidget("button", "⏭️ To End", null, () => {
+            // 獲取 total 值（如果有的話）
+            const total = this.outputs?.[3]?.value ?? 0;
+            if (total > 0) {
+                this.widgets.find(w => w.name === "start_index").value = total - 1;
+            }
+        });
+    }
+
+    triggerReset() {
+        // 發送重置事件到後端
+        const nodeId = this.id;
+        app.graphToPrompt().then(workflow => {
+            if (workflow.output) {
+                app.queuePrompt(workflow.output, workflow.workflow);
+            }
+        });
+    }
+}
+
+// 註冊節點擴展
+app.registerExtension({
+    name: "rgthree.TextBatch",
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name === "TextQueueProcessor") {
+            Object.assign(nodeType.prototype, TextQueueProcessorNode.prototype);
+        }
+        else if (nodeData.name === "ImageQueueProcessor") {
+            Object.assign(nodeType.prototype, ImageQueueProcessorNode.prototype);
+        }
+    }
+});

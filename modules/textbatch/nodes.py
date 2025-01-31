@@ -5,6 +5,8 @@ from server import PromptServer
 import torch
 import numpy as np
 from typing import List, Union
+import glob
+from PIL import Image
 
 # 設定基本的日誌記錄格式和級別
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -374,7 +376,11 @@ class TextQueueProcessor:
                 "start_index": ("INT", {"default": 0, "min": 0, "max": 10000}),
                 "trigger_next": ("BOOLEAN", {"default": True, "label_on": "Trigger", "label_off": "Don't trigger"}),
             },
-            "hidden": {"unique_id": "UNIQUE_ID"}
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO"
+            }
         }
 
     RETURN_TYPES = ("STRING", "INT", "INT", "BOOLEAN", "STRING")
@@ -383,12 +389,13 @@ class TextQueueProcessor:
     CATEGORY = "TextBatch"
     OUTPUT_NODE = True
 
-    def process(self, text, separator_type, separator, start_index, trigger_next, unique_id):
+    def process(self, text, separator_type, separator, start_index, trigger_next, unique_id, prompt=None, extra_pnginfo=None):
         try:
             # 檢查是否需要重置
             need_reset = (
                 self.state.get("last_input") != text or
-                self.state.get("completed", False)
+                self.state.get("completed", False) or
+                (prompt and extra_pnginfo)
             )
 
             if need_reset:
@@ -444,16 +451,145 @@ class TextQueueProcessor:
             logger.error(f"Error in process: {str(e)}")
             return ("", -1, 0, True, f"Error: {str(e)}")
 
+class ImageQueueProcessor:
+    """處理圖片佇列的節點"""
+    def __init__(self):
+        self.state_file = os.path.join(os.path.dirname(__file__), "image_queue_processor_state.json")
+        self.state = self.load_state()
+        self.reset_state()
+
+    def reset_state(self):
+        self.state = {
+            "current_index": 0,
+            "last_input": "",
+            "completed": False
+        }
+        self.save_state()
+
+    def load_state(self):
+        try:
+            if os.path.exists(self.state_file):
+                with open(self.state_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading state file: {str(e)}")
+        return {
+            "current_index": 0,
+            "last_input": "",
+            "completed": False
+        }
+
+    def save_state(self):
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump(self.state, f)
+        except Exception as e:
+            logger.error(f"Error saving state file: {str(e)}")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),  # 接受多張圖片的輸入
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 10000}),
+                "trigger_next": ("BOOLEAN", {"default": True, "label_on": "Trigger", "label_off": "Don't trigger"}),
+            },
+            "hidden": {
+                "unique_id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO"
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("image", "current_index", "total", "completed", "status")
+    FUNCTION = "process"
+    CATEGORY = "TextBatch"
+    OUTPUT_NODE = True
+
+    def process(self, images, start_index, trigger_next, unique_id, prompt=None, extra_pnginfo=None):
+        try:
+            # 確保輸入是 tensor 並且格式正確
+            if not isinstance(images, torch.Tensor):
+                return (None, -1, 0, True, "Invalid input: not a tensor")
+
+            # 處理單張圖片的情況
+            if len(images.shape) == 3:
+                images = images.unsqueeze(0)
+
+            # 獲取總數
+            total = images.shape[0]
+            if total == 0:
+                return (None, -1, 0, True, "No images found")
+
+            # 生成唯一的輸入標識符
+            input_hash = str(hash(str(images.shape)))
+
+            # 檢查是否需要重置
+            need_reset = (
+                self.state.get("last_input") != input_hash or
+                self.state.get("completed", False) or
+                (prompt and extra_pnginfo)
+            )
+
+            if need_reset:
+                self.reset_state()
+                self.state["last_input"] = input_hash
+                current_index = start_index
+            else:
+                current_index = min(max(start_index, self.state.get("current_index", 0)), total - 1)
+
+            # 獲取當前圖片
+            current_image = images[current_index:current_index+1]
+
+            # 檢查是否是最後一張
+            is_last = current_index >= total - 1
+            
+            # 更新狀態
+            if not is_last and trigger_next:
+                next_index = current_index + 1
+                self.state["current_index"] = next_index
+                completed = False
+                
+                # 只有在非最後一張且啟用 trigger_next 時才發送佇列事件
+                if next_index < total:
+                    PromptServer.instance.send_sync("textbatch-add-queue", {})
+            else:
+                completed = True
+                self.state["current_index"] = 0
+                self.state["completed"] = True
+
+            self.state["completed"] = completed
+            self.save_state()
+
+            # 生成狀態信息
+            status = f"Processing {current_index + 1}/{total}"
+            if completed:
+                status += " | Completed"
+
+            # 更新節點顯示的當前索引
+            if not completed:
+                PromptServer.instance.send_sync("textbatch-node-feedback", 
+                    {"node_id": unique_id, "widget_name": "start_index", "type": "int", "value": self.state["current_index"]})
+
+            return (current_image, current_index, total, completed, status)
+
+        except Exception as e:
+            logger.error(f"Error in process: {str(e)}")
+            return (None, -1, 0, True, f"Error: {str(e)}")
+
 # 節點類映射
 NODE_CLASS_MAPPINGS = {
     "TextBatch": TextBatchNode, 
     "TextQueueProcessor": TextQueueProcessor,
-    "TextSplitCounter": TextSplitCounterNode
+    "TextSplitCounter": TextSplitCounterNode,
+    "ImageQueueProcessor": ImageQueueProcessor
 }
 
 # 節點顯示名稱映射
 NODE_DISPLAY_NAME_MAPPINGS = {
     "TextBatch": "Text Batch", 
     "TextQueueProcessor": "Text Queue Processor",
-    "TextSplitCounter": "Text Split Counter"
+    "TextSplitCounter": "Text Split Counter",
+    "ImageQueueProcessor": "Image Queue Processor"
 }
