@@ -18,6 +18,7 @@ Text Queue Processor
 
 ### 新增功能：
 增加了 Image Queue Processor 節點，可以將圖片每行一組，批量執行(但目前需要搭配Load Image Batch From D(Inspire)這類的使用)
+![image](https://github.com/user-attachments/assets/bc264fd8-042f-42c2-b66c-72639ca8a197)
 
 
 
