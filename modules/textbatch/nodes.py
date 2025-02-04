@@ -7,6 +7,11 @@ import numpy as np
 from typing import List, Union
 import glob
 from PIL import Image
+from PIL import ImageOps
+import comfy
+import folder_paths
+import base64
+from io import BytesIO
 
 # 設定基本的日誌記錄格式和級別
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -578,12 +583,374 @@ class ImageQueueProcessor:
             logger.error(f"Error in process: {str(e)}")
             return (None, -1, 0, True, f"Error: {str(e)}")
 
+class ImageInfoExtractorNode:
+    """圖片資訊提取節點
+    用於提取圖片的基本資訊，包括尺寸、檔名等
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),  # 接受圖片輸入
+                "image_path": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "可選：輸入圖片路徑以獲取更多資訊"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("width", "height", "batch_size", "channels", "file_name", "file_format", "file_size", "color_mode", "status")
+    FUNCTION = "extract_info"
+    CATEGORY = "TextBatch"
+
+    def extract_info(self, images, image_path=""):
+        try:
+            # 確保輸入是 tensor 並且格式正確
+            if not isinstance(images, torch.Tensor):
+                return (0, 0, 0, 0, "", "", "", "", "錯誤：輸入不是有效的圖片張量")
+
+            # 處理單張圖片的情況
+            if len(images.shape) == 3:
+                images = images.unsqueeze(0)
+
+            # 獲取基本資訊
+            batch_size = images.shape[0]
+            height = images.shape[1]
+            width = images.shape[2]
+            channels = images.shape[3]
+
+            # 預設值
+            file_name = ""
+            file_format = ""
+            file_size = ""
+            color_mode = ""
+
+            # 如果提供了圖片路徑，嘗試獲取額外資訊
+            if image_path and os.path.exists(image_path):
+                try:
+                    file_size = f"{os.path.getsize(image_path) / (1024 * 1024):.2f}MB"
+                    file_name = os.path.basename(image_path)
+                    
+                    # 使用 PIL 讀取圖片以獲取更多資訊
+                    with Image.open(image_path) as img:
+                        color_mode = img.mode
+                        file_format = img.format or os.path.splitext(image_path)[1]
+                except Exception as e:
+                    return (width, height, batch_size, channels, "", "", "", "", f"讀取檔案資訊時發生錯誤: {str(e)}")
+
+            status = f"成功提取 {batch_size} 張圖片的資訊"
+            return (width, height, batch_size, channels, file_name, file_format, file_size, color_mode, status)
+
+        except Exception as e:
+            logger.error(f"提取圖片資訊時發生錯誤: {str(e)}")
+            return (0, 0, 0, 0, "", "", "", "", f"錯誤: {str(e)}")
+
+class PathParserNode:
+    """路徑解析節點
+    用於解析檔案路徑，分離出檔名和資料夾路徑
+    支援絕對路徑和相對路徑
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "file_path": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "輸入完整檔案路徑"
+                }),
+                "normalize_path": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "是",
+                    "label_off": "否"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("file_name_no_ext", "folder_path", "extension", "absolute_path", "status")
+    FUNCTION = "parse_path"
+    CATEGORY = "TextBatch"
+
+    def parse_path(self, file_path: str, normalize_path: bool = True):
+        try:
+            if not file_path:
+                return ("", "", "", "", "錯誤：未提供檔案路徑")
+
+            # 檢查輸入類型並轉換為字串
+            if isinstance(file_path, (list, tuple)):
+                # 如果是列表或元組，取第一個元素
+                if len(file_path) > 0:
+                    file_path = str(file_path[0])
+                else:
+                    return ("", "", "", "", "錯誤：空列表")
+            else:
+                file_path = str(file_path)
+
+            # 標準化路徑分隔符
+            file_path = os.path.normpath(file_path)
+            
+            # 轉換為絕對路徑
+            absolute_path = os.path.abspath(file_path)
+            
+            # 取得檔案名稱（含副檔名）和資料夾路徑
+            folder_path = os.path.dirname(absolute_path)
+            full_filename = os.path.basename(absolute_path)
+            
+            # 分離檔名和副檔名
+            file_name_no_ext, extension = os.path.splitext(full_filename)
+            
+            # 如果副檔名存在，移除開頭的點
+            extension = extension[1:] if extension.startswith('.') else extension
+            
+            # 處理路徑格式
+            if normalize_path:
+                # 使用正斜線
+                folder_path = folder_path.replace('\\', '/')
+                absolute_path = absolute_path.replace('\\', '/')
+            
+            # 生成狀態信息
+            status_parts = []
+            status_parts.append(f"檔名: {file_name_no_ext}")
+            if extension:
+                status_parts.append(f"副檔名: {extension}")
+            status_parts.append(f"目錄: {folder_path}")
+            
+            status = " | ".join(status_parts)
+
+            return (
+                file_name_no_ext,  # 無副檔名的檔名
+                folder_path,       # 資料夾路徑
+                extension,         # 副檔名（不含點號）
+                absolute_path,     # 完整絕對路徑
+                status            # 狀態信息
+            )
+
+        except Exception as e:
+            logger.error(f"解析路徑時發生錯誤: {str(e)}")
+            return ("", "", "", "", f"錯誤: {str(e)}")
+        
+class LoadImagesFromDirBatchM:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "directory": ("STRING", {"default": ""}),
+            },
+            "optional": {
+                "image_load_cap": ("INT", {"default": 0, "min": 0, "step": 1}),
+                "start_index": ("INT", {"default": 0, "min": -1, "step": 1}),
+                "load_always": ("BOOLEAN", {"default": False, "label_on": "enabled", "label_off": "disabled"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "STRING", "STRING")
+    RETURN_NAMES = ("image", "mask", "count", "filenames", "full_paths")
+    FUNCTION = "load_images"
+
+    CATEGORY = "image"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        if 'load_always' in kwargs and kwargs['load_always']:
+            return float("NaN")
+        else:
+            return hash(frozenset(kwargs))
+
+    def load_images(self, directory: str, image_load_cap: int = 0, start_index: int = 0, load_always=False):
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(f"Directory '{directory} cannot be found.'")
+        dir_files = os.listdir(directory)
+        if len(dir_files) == 0:
+            raise FileNotFoundError(f"No files in directory '{directory}'.")
+
+        # Filter files by extension
+        valid_extensions = ['.jpg', '.jpeg', '.png', '.webp']
+        dir_files = [f for f in dir_files if any(f.lower().endswith(ext) for ext in valid_extensions)]
+
+        dir_files = sorted(dir_files)
+        dir_files = [os.path.join(directory, x) for x in dir_files]
+
+        # start at start_index
+        dir_files = dir_files[start_index:]
+
+        images = []
+        masks = []
+        filenames = []  # 檔名列表（不含路徑）
+        full_paths = []  # 完整路徑列表
+
+        limit_images = False
+        if image_load_cap > 0:
+            limit_images = True
+        image_count = 0
+
+        has_non_empty_mask = False
+
+        for image_path in dir_files:
+            if os.path.isdir(image_path):
+                continue
+            if limit_images and image_count >= image_load_cap:
+                break
+            i = Image.open(image_path)
+            i = ImageOps.exif_transpose(i)
+            image = i.convert("RGB")
+            image = np.array(image).astype(np.float32) / 255.0
+            image = torch.from_numpy(image)[None,]
+            if 'A' in i.getbands():
+                mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
+                mask = 1. - torch.from_numpy(mask)
+                has_non_empty_mask = True
+            else:
+                mask = torch.zeros((64, 64), dtype=torch.float32, device="cpu")
+            images.append(image)
+            masks.append(mask)
+            # 儲存檔名（不含路徑）
+            filenames.append(os.path.basename(image_path))
+            # 儲存標準化的完整路徑
+            norm_path = os.path.abspath(image_path).replace('\\', '/')
+            full_paths.append(norm_path)
+            image_count += 1
+
+        if len(images) == 1:
+            # 單張圖片時返回單一檔名和路徑
+            return (images[0], masks[0], 1, filenames[0], full_paths[0])
+
+        elif len(images) > 1:
+            image1 = images[0]
+            mask1 = None
+
+            for image2 in images[1:]:
+                if image1.shape[1:] != image2.shape[1:]:
+                    image2 = comfy.utils.common_upscale(image2.movedim(-1, 1), image1.shape[2], image1.shape[1], "bilinear", "center").movedim(1, -1)
+                image1 = torch.cat((image1, image2), dim=0)
+
+            for mask2 in masks:
+                if has_non_empty_mask:
+                    if image1.shape[1:3] != mask2.shape:
+                        mask2 = torch.nn.functional.interpolate(mask2.unsqueeze(0).unsqueeze(0), size=(image1.shape[1], image1.shape[2]), mode='bilinear', align_corners=False)
+                        mask2 = mask2.squeeze(0)
+                    else:
+                        mask2 = mask2.unsqueeze(0)
+                else:
+                    mask2 = mask2.unsqueeze(0)
+
+                if mask1 is None:
+                    mask1 = mask2
+                else:
+                    mask1 = torch.cat((mask1, mask2), dim=0)
+
+            # 多張圖片時返回以逗號分隔的檔名和路徑字串
+            return (image1, mask1, len(images), ",".join(filenames), ",".join(full_paths))
+
+class ImageFilenameProcessor:
+    """圖片檔名處理節點
+    用於處理單張或多張圖片的檔名，可以根據索引獲取特定檔名
+    提供完整檔名、無副檔名、副檔名和完整路徑等多種輸出
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "filenames": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "逗號分隔的檔名或路徑列表"
+                }),
+                "index": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "step": 1,
+                    "display": "number"
+                }),
+                "directory": ("STRING", {
+                    "multiline": False,
+                    "default": "",
+                    "placeholder": "可選：指定檔案目錄路徑"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "INT", "STRING")
+    RETURN_NAMES = ("filename", "name_no_ext", "extension", "full_path", "total_files", "status")
+    FUNCTION = "process_filename"
+    CATEGORY = "TextBatch"
+
+    def process_filename(self, filenames: str, index: int = 0, directory: str = ""):
+        try:
+            # 處理空輸入
+            if not filenames.strip():
+                return ("", "", "", "", 0, "錯誤：沒有輸入檔名")
+
+            # 分割檔名列表
+            path_list = [f.strip() for f in filenames.split(",") if f.strip()]
+            total_files = len(path_list)
+
+            # 處理空列表
+            if total_files == 0:
+                return ("", "", "", "", 0, "錯誤：沒有有效的檔名")
+
+            # 確保索引在有效範圍內
+            if index < 0:
+                index = 0
+            if index >= total_files:
+                index = total_files - 1
+
+            # 獲取指定索引的路徑
+            selected_path = path_list[index]
+            
+            # 從路徑中提取檔名
+            filename = os.path.basename(selected_path)
+            
+            # 分離檔名和副檔名
+            name_no_ext, extension = os.path.splitext(filename)
+            # 確保副檔名不包含點號
+            extension = extension[1:] if extension.startswith('.') else extension
+            
+            # 處理完整路徑
+            if directory:
+                # 如果提供了目錄，使用該目錄和檔名組合
+                directory = os.path.normpath(directory)
+                full_path = os.path.join(directory, filename)
+            else:
+                # 否則使用輸入的路徑
+                full_path = selected_path
+            
+            # 標準化路徑格式（使用正斜線）
+            full_path = os.path.normpath(full_path).replace('\\', '/')
+
+            # 生成狀態信息
+            status = f"成功獲取第 {index + 1}/{total_files} 個檔名"
+            if directory:
+                status += f" (目錄: {directory})"
+
+            return (
+                filename,          # 完整檔名（含副檔名）
+                name_no_ext,       # 無副檔名
+                extension,         # 副檔名（不含點號）
+                full_path,         # 完整路徑
+                total_files,       # 總檔案數
+                status            # 狀態信息
+            )
+
+        except Exception as e:
+            logger.error(f"處理檔名時發生錯誤: {str(e)}")
+            return ("", "", "", "", 0, f"錯誤: {str(e)}")
+
 # 節點類映射
 NODE_CLASS_MAPPINGS = {
     "TextBatch": TextBatchNode, 
     "TextQueueProcessor": TextQueueProcessor,
     "TextSplitCounter": TextSplitCounterNode,
-    "ImageQueueProcessor": ImageQueueProcessor
+    "ImageQueueProcessor": ImageQueueProcessor,
+    "ImageInfoExtractor": ImageInfoExtractorNode,
+    "PathParser": PathParserNode,
+    "LoadImagesFromDirBatch": LoadImagesFromDirBatchM,
+    "ImageFilenameProcessor": ImageFilenameProcessor  # 添加新節點
 }
 
 # 節點顯示名稱映射
@@ -591,5 +958,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TextBatch": "Text Batch", 
     "TextQueueProcessor": "Text Queue Processor",
     "TextSplitCounter": "Text Split Counter",
-    "ImageQueueProcessor": "Image Queue Processor"
+    "ImageQueueProcessor": "Image Queue Processor",
+    "ImageInfoExtractor": "Image Info Extractor",
+    "PathParser": "Path Parser",
+    "LoadImagesFromDirBatch": "Load Images From Dir Batch",
+    "ImageFilenameProcessor": "Image Filename Processor"  # 添加新節點
 }
