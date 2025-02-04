@@ -21,7 +21,7 @@ Text Queue Processor
 ![image](https://github.com/user-attachments/assets/bc264fd8-042f-42c2-b66c-72639ca8a197)
 
 ### 新增功能Load Images From Dir Batch(批量讀取圖片從資料夾)：
-這個節點的功能是由Load Image Batch From D(Inspire)這個節點修改而來，主要是因為Load Image Batch From D(Inspire)沒有輸出圖片檔名，無法得知當前的圖片名稱，因此製作了這個改良版。
+這個節點的功能是由Load Image Batch From Dir(Inspire)這個節點修改而來，主要是因為Load Image Batch From Dir(Inspire)沒有輸出圖片檔名，無法得知當前的圖片名稱，因此製作了這個改良版。
 ![image](https://github.com/user-attachments/assets/71d577d4-da75-4c9e-baa1-ccd2d4d5694e)
 filenames:輸出的是只有檔名 (圖片1.png,圖片2.png ...) 輸出這樣的字串 
 full_paths:輸出的是圖片的完整路徑 (F:AI/ComfyUI/output/圖片1.png,F:AI/ComfyUI/output/圖片2.png ...) 的字串
